@@ -941,7 +941,7 @@ static struct device_type_template sbc_template = {
 		{spc_service_action, maint_in_service_actions,},
 		{spc_illegal_op,},
 		{spc_illegal_op,},
-		{spc_illegal_op,},
+		{sbc_rw,},
 		{spc_illegal_op,},
 
 		{sbc_rw, NULL, PR_EA_FA|PR_EA_FN},

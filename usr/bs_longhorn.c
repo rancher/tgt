@@ -49,6 +49,9 @@
 struct longhorn_info {
 	struct lh_client_conn *conn;
 	size_t size;
+	char *path;
+
+	pthread_rwlock_t rwlock;
 };
 
 #define LHP(lu)	((struct longhorn_info *) \
@@ -72,14 +75,17 @@ static void bs_longhorn_request(struct scsi_cmd *cmd)
 	uint8_t key = 0;
 	uint16_t asc = 0;
 	struct longhorn_info *lh = LHP(cmd->dev);
+	struct lh_client_conn *old_conn, *new_conn;
 
 	switch (cmd->scb[0]) {
 	case WRITE_6:
 	case WRITE_10:
 	case WRITE_12:
 		length = scsi_get_out_length(cmd);
+		pthread_rwlock_rdlock(&lh->rwlock);
 		ret = lh_client_write_at(lh->conn, scsi_get_out_buffer(cmd),
 			    length, cmd->offset);
+		pthread_rwlock_unlock(&lh->rwlock);
 		if (ret) {
                         eprintf("fail to write at %lx for %u\n", cmd->offset, length);
 			set_medium_error(&result, &key, &asc);
@@ -90,12 +96,47 @@ static void bs_longhorn_request(struct scsi_cmd *cmd)
 	case READ_12:
 	case READ_16:
 		length = scsi_get_in_length(cmd);
+		pthread_rwlock_rdlock(&lh->rwlock);
 		ret = lh_client_read_at(lh->conn, scsi_get_in_buffer(cmd),
 			    length, cmd->offset);
+		pthread_rwlock_unlock(&lh->rwlock);
 		if (ret) {
                         eprintf("fail to read at %lx for %u\n", cmd->offset, length);
 			set_medium_error(&result, &key, &asc);
                 }
+		break;
+	case EXCHANGE_MEDIUM:
+		old_conn = lh->conn;
+		new_conn = lh_client_allocate_conn();
+		if (new_conn == NULL) {
+			eprintf("cannot allocate new connection\n");
+			set_medium_error(&result, &key, &asc);
+			break;
+		}
+
+		eprintf("reconnecting to socket %s\n", lh->path);
+		pthread_rwlock_wrlock(&lh->rwlock);
+		lh->conn = new_conn;
+		ret = lh_client_open_conn(lh->conn, lh->path);
+		if (ret < 0) {
+			eprintf("cannot refresh connection to %s: %d, rolling back", lh->path, ret);
+			lh->conn = old_conn;
+			set_medium_error(&result, &key, &asc);
+			pthread_rwlock_unlock(&lh->rwlock);
+			break;
+		}
+		// we can allow other thread to proceed with the new connection now
+		pthread_rwlock_unlock(&lh->rwlock);
+
+		eprintf("waiting for old requests to drain\n");
+		// now wait for the old connection to drain
+		ret = lh_client_wait_for_draining_requests(old_conn);
+		if (ret) {
+			eprintf("failed to wait for draining the requests from the connection: %d, forcing closing", ret);
+		}
+		eprintf("close old longhorn connection\n");
+		lh_client_close_conn(old_conn);
+		lh_client_free_conn(old_conn);
 		break;
 	default:
 		eprintf("cmd->scb[0]: %x\n", cmd->scb[0]);
@@ -118,6 +159,7 @@ static int bs_longhorn_open(struct scsi_lu *lu, char *path,
 {
 	struct longhorn_info *lh = LHP(lu);
 	int rc;
+	int len;
 
         rc = lh_client_open_conn(lh->conn, path);
 	if (rc < 0) {
@@ -126,6 +168,11 @@ static int bs_longhorn_open(struct scsi_lu *lu, char *path,
 	}
 
 	*size = lh->size;
+
+	len = strlen(path);
+	lh->path = malloc(len + 1); // ending '\0'
+	strcpy(lh->path, path);
+
 	return 0;
 }
 
@@ -183,6 +230,7 @@ static tgtadm_err bs_longhorn_init(struct scsi_lu *lu, char *bsopts)
 	char *ssize = NULL;
 	size_t size = 0;
         struct longhorn_info *lh = LHP(lu);
+	int rc = 0;
 
 	while (bsopts && strlen(bsopts)) {
 		if (is_opt("size", bsopts)) {
@@ -197,6 +245,11 @@ static tgtadm_err bs_longhorn_init(struct scsi_lu *lu, char *bsopts)
 		return TGTADM_NOMEM;
 	}
 
+	rc = pthread_rwlock_init(&lh->rwlock, NULL);
+	if (rc < 0) {
+		perror("Cannot init rwlock for connection\n");
+		return TGTADM_NOMEM;
+	}
 	lh->size = size;
 	return bs_thread_open(info, bs_longhorn_request, nr_iothreads);
 }
@@ -204,11 +257,14 @@ static tgtadm_err bs_longhorn_init(struct scsi_lu *lu, char *bsopts)
 static void bs_longhorn_exit(struct scsi_lu *lu)
 {
 	struct bs_thread_info *info = BS_THREAD_I(lu);
+	struct longhorn_info *lh = LHP(lu);
 
 	bs_thread_close(info);
 
-        lh_client_free_conn(LHP(lu)->conn);
-        LHP(lu)->conn = NULL;
+	lh_client_free_conn(lh->conn);
+	lh->conn = NULL;
+	free(lh->path);
+	pthread_rwlock_destroy(&lh->rwlock);
 }
 
 static struct backingstore_template longhorn_bst = {
@@ -225,5 +281,40 @@ static struct backingstore_template longhorn_bst = {
 
 __attribute__((constructor)) void register_bs_module(void)
 {
+	unsigned char opcodes[] = {
+		ALLOW_MEDIUM_REMOVAL,
+		FORMAT_UNIT,
+		INQUIRY,
+		MAINT_PROTOCOL_IN,
+		MODE_SELECT,
+		MODE_SELECT_10,
+		MODE_SENSE,
+		MODE_SENSE_10,
+		PERSISTENT_RESERVE_IN,
+		PERSISTENT_RESERVE_OUT,
+		READ_10,
+		READ_12,
+		READ_16,
+		READ_6,
+		READ_CAPACITY,
+		RELEASE,
+		REPORT_LUNS,
+		REQUEST_SENSE,
+		RESERVE,
+		SEND_DIAGNOSTIC,
+		SERVICE_ACTION_IN,
+		START_STOP,
+		SYNCHRONIZE_CACHE,
+		SYNCHRONIZE_CACHE_16,
+		TEST_UNIT_READY,
+		WRITE_10,
+		WRITE_12,
+		WRITE_16,
+		WRITE_6,
+		EXCHANGE_MEDIUM,
+	};
+
+	bs_create_opcode_map(&longhorn_bst, opcodes, ARRAY_SIZE(opcodes));
+
 	register_backingstore_template(&longhorn_bst);
 }
