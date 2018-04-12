@@ -114,27 +114,20 @@ static void bs_longhorn_request(struct scsi_cmd *cmd)
 			break;
 		}
 
-		eprintf("reconnecting to socket %s\n", lh->path);
-		pthread_rwlock_wrlock(&lh->rwlock);
-		lh->conn = new_conn;
-		ret = lh_client_open_conn(lh->conn, lh->path);
+		ret = lh_client_open_conn(new_conn, lh->path);
 		if (ret < 0) {
-			eprintf("cannot refresh connection to %s: %d, rolling back", lh->path, ret);
-			lh->conn = old_conn;
+			eprintf("cannot refresh connection to %s: %d\n", lh->path, ret);
 			set_medium_error(&result, &key, &asc);
-			pthread_rwlock_unlock(&lh->rwlock);
 			break;
 		}
-		// we can allow other thread to proceed with the new connection now
+		eprintf("reconnected to %s\n", lh->path);
+
+		pthread_rwlock_wrlock(&lh->rwlock);
+		// no on-the-fly request after this point due to the lock
+		lh->conn = new_conn;
 		pthread_rwlock_unlock(&lh->rwlock);
 
-		eprintf("waiting for old requests to drain\n");
-		// now wait for the old connection to drain
-		ret = lh_client_wait_for_draining_requests(old_conn);
-		if (ret) {
-			eprintf("failed to wait for draining the requests from the connection: %d, forcing closing", ret);
-		}
-		eprintf("close old longhorn connection\n");
+		eprintf("connection updated, close old longhorn connection\n");
 		lh_client_close_conn(old_conn);
 		lh_client_free_conn(old_conn);
 		break;
