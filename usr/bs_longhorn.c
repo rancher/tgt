@@ -81,6 +81,7 @@ static void bs_longhorn_request(struct scsi_cmd *cmd)
 	case WRITE_6:
 	case WRITE_10:
 	case WRITE_12:
+	case WRITE_16:
 		length = scsi_get_out_length(cmd);
 		pthread_rwlock_rdlock(&lh->rwlock);
 		ret = lh_client_write_at(lh->conn, scsi_get_out_buffer(cmd),
@@ -132,7 +133,7 @@ static void bs_longhorn_request(struct scsi_cmd *cmd)
 		lh_client_free_conn(old_conn);
 		break;
 	default:
-		eprintf("cmd->scb[0]: %x\n", cmd->scb[0]);
+		eprintf("unsupported cmd->scb[0]: %x\n", cmd->scb[0]);
 		break;
 	}
 
