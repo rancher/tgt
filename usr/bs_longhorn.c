@@ -74,6 +74,9 @@ static void bs_longhorn_request(struct scsi_cmd *cmd)
 	int result = SAM_STAT_GOOD;
 	uint8_t key = 0;
 	uint16_t asc = 0;
+	char *tmpbuf;
+	uint64_t offset;
+	uint32_t tl;
 	struct longhorn_info *lh = LHP(cmd->dev);
 	struct lh_client_conn *old_conn, *new_conn;
 
@@ -131,6 +134,60 @@ static void bs_longhorn_request(struct scsi_cmd *cmd)
 		eprintf("connection updated, close old longhorn connection\n");
 		lh_client_close_conn(old_conn);
 		lh_client_free_conn(old_conn);
+		break;
+	case UNMAP:
+        /*
+         * Reference: Section "3.54 UNMAP command" in doc
+         *   https://www.seagate.com/files/staticfiles/support/docs/manual/Interface%20manuals/100293068j.pdf
+         */
+		if (!cmd->dev->attrs.thinprovisioning) {
+			eprintf("invalid cmd->dev->attrs.thinprovisioning == false\n");
+			result = SAM_STAT_CHECK_CONDITION;
+			key = ILLEGAL_REQUEST;
+			asc = ASC_INVALID_FIELD_IN_CDB;
+			break;
+		}
+
+		length = scsi_get_out_length(cmd);
+		tmpbuf = scsi_get_out_buffer(cmd);
+
+		if (length < 8)
+			break;
+
+		length -= 8;
+		tmpbuf += 8;
+
+		while (length >= 16) {
+			offset = get_unaligned_be64(&tmpbuf[0]);
+			offset = offset << cmd->dev->blk_shift;
+
+			tl = get_unaligned_be32(&tmpbuf[8]);
+			tl = tl << cmd->dev->blk_shift;
+
+			if (offset + tl > cmd->dev->size) {
+				eprintf("UNMAP beyond EOF\n");
+				result = SAM_STAT_CHECK_CONDITION;
+				key = ILLEGAL_REQUEST;
+				asc = ASC_LBA_OUT_OF_RANGE;
+				break;
+			}
+
+			if (tl > 0) {
+				if (lh_client_unmap(lh->conn, NULL, tl, offset) != 0) {
+					eprintf("Failed to punch hole for"
+						" UNMAP at offset:%" PRIu64
+						" length:%d\n",
+						offset, tl);
+					result = SAM_STAT_CHECK_CONDITION;
+					key = HARDWARE_ERROR;
+					asc = ASC_INTERNAL_TGT_FAILURE;
+					break;
+				}
+			}
+
+			length -= 16;
+			tmpbuf += 16;
+		}
 		break;
 	case SYNCHRONIZE_CACHE:
 	case SYNCHRONIZE_CACHE_16:
@@ -310,6 +367,7 @@ __attribute__((constructor)) void register_bs_module(void)
 		WRITE_16,
 		WRITE_6,
 		EXCHANGE_MEDIUM,
+		UNMAP,
 	};
 
 	bs_create_opcode_map(&longhorn_bst, opcodes, ARRAY_SIZE(opcodes));
