@@ -1972,6 +1972,47 @@ tgtadm_err spc_lu_offline(struct scsi_lu *lu)
 	return TGTADM_SUCCESS;
 }
 
+
+static char *slurp_to_semi(char **p)
+{
+	char *end = index(*p, ';');
+	char *ret;
+	int len;
+
+	if (end == NULL)
+		end = *p + strlen(*p);
+	len = end - *p;
+	ret = malloc(len + 1);
+	strncpy(ret, *p, len);
+	ret[len] = '\0';
+	*p = end;
+	/* Jump past the semicolon, if we stopped at one */
+	if (**p == ';')
+		*p = end + 1;
+	return ret;
+}
+
+static char *slurp_value(char **p)
+{
+	char *equal = index(*p, '=');
+	if (equal) {
+		*p = equal + 1;
+		return slurp_to_semi(p);
+	} else {
+		return NULL;
+	}
+}
+
+static int is_opt(const char *opt, char *p)
+{
+	int ret = 0;
+	if ((strncmp(p, opt, strlen(opt)) == 0) &&
+		(p[strlen(opt)] == '=')) {
+		ret = 1;
+	}
+	return ret;
+}
+
 tgtadm_err lu_config(struct scsi_lu *lu, char *params, match_fn_t *fn)
 {
 	tgtadm_err adm_err = TGTADM_SUCCESS;
@@ -2072,6 +2113,24 @@ tgtadm_err lu_config(struct scsi_lu *lu, char *params, match_fn_t *fn)
 		case Opt_path:
 			match_strncpy(buf, &args[0], sizeof(buf));
 			adm_err = tgt_device_path_update(lu->tgt, lu, buf);
+			break;
+		case Opt_bsopts:
+			match_strncpy(buf, &args[0], sizeof(buf));
+			char *lh_opt_ptr = buf;
+			char *lh_opt_val = NULL;
+			size_t size = 0;
+			if (is_opt("size", lh_opt_ptr)) {
+				lh_opt_val = slurp_value(&lh_opt_ptr);
+				size = atoll(lh_opt_val);
+				if (lu->size > size) {
+					eprintf("Invalid bsopts %s, the input size %zu is smaller than the current size %lu\n", buf, size, lu->size);
+					adm_err = TGTADM_INVALID_REQUEST;
+					break;
+				}
+				lu->size = size;
+			}else {
+				adm_err = TGTADM_INVALID_REQUEST;
+			}
 			break;
 		default:
 			adm_err = fn ? fn(lu, p) : TGTADM_INVALID_REQUEST;
