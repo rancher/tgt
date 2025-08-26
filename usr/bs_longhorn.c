@@ -101,7 +101,7 @@ static void bs_longhorn_request(struct scsi_cmd *cmd)
 			    length, cmd->offset);
 		pthread_rwlock_unlock(&lh->rwlock);
 		if (ret) {
-            eprintf("fail to write at %" PRIu64 " for %u, ret: %d\n", cmd->offset, length, ret);
+            LONGHORN_ERROR_LOG("fail to write at %" PRIu64 " for %u, ret: %d", cmd->offset, length, ret);
             if (ret == -ENOSPC) {
                 set_nospc_error(&result, &key, &asc);
             } else {
@@ -119,7 +119,7 @@ static void bs_longhorn_request(struct scsi_cmd *cmd)
 			    length, cmd->offset);
 		pthread_rwlock_unlock(&lh->rwlock);
 		if (ret) {
-            eprintf("fail to read at %" PRIu64 " for %u\n", cmd->offset, length);
+            LONGHORN_ERROR_LOG("fail to read at %" PRIu64 " for %u", cmd->offset, length);
 			set_medium_error(&result, &key, &asc);
         }
 		break;
@@ -127,25 +127,25 @@ static void bs_longhorn_request(struct scsi_cmd *cmd)
 		old_conn = lh->conn;
 		new_conn = lh_client_allocate_conn(lh->request_timeout);
 		if (new_conn == NULL) {
-			eprintf("cannot allocate new connection\n");
+			LONGHORN_ERROR_LOG("cannot allocate new connection");
 			set_medium_error(&result, &key, &asc);
 			break;
 		}
 
 		ret = lh_client_open_conn(new_conn, lh->path);
 		if (ret < 0) {
-			eprintf("cannot refresh connection to %s: %d\n", lh->path, ret);
+			LONGHORN_ERROR_LOG("cannot refresh connection to %s: %d", lh->path, ret);
 			set_medium_error(&result, &key, &asc);
 			break;
 		}
-		eprintf("reconnected to %s\n", lh->path);
+		LONGHORN_ERROR_LOG("reconnected to %s", lh->path);
 
 		pthread_rwlock_wrlock(&lh->rwlock);
 		// no on-the-fly request after this point due to the lock
 		lh->conn = new_conn;
 		pthread_rwlock_unlock(&lh->rwlock);
 
-		eprintf("connection updated, close old longhorn connection\n");
+		LONGHORN_ERROR_LOG("connection updated, close old longhorn connection");
 		lh_client_close_conn(old_conn);
 		lh_client_free_conn(old_conn);
 		break;
@@ -155,7 +155,7 @@ static void bs_longhorn_request(struct scsi_cmd *cmd)
          *   https://www.seagate.com/files/staticfiles/support/docs/manual/Interface%20manuals/100293068j.pdf
          */
 		if (!cmd->dev->attrs.thinprovisioning) {
-			eprintf("invalid cmd->dev->attrs.thinprovisioning == false\n");
+			LONGHORN_ERROR_LOG("invalid cmd->dev->attrs.thinprovisioning == false");
 			result = SAM_STAT_CHECK_CONDITION;
 			key = ILLEGAL_REQUEST;
 			asc = ASC_INVALID_FIELD_IN_CDB;
@@ -179,7 +179,7 @@ static void bs_longhorn_request(struct scsi_cmd *cmd)
 			tl = tl << cmd->dev->blk_shift;
 
 			if (offset + tl > cmd->dev->size) {
-				eprintf("UNMAP beyond EOF\n");
+				LONGHORN_ERROR_LOG("UNMAP beyond EOF");
 				result = SAM_STAT_CHECK_CONDITION;
 				key = ILLEGAL_REQUEST;
 				asc = ASC_LBA_OUT_OF_RANGE;
@@ -188,9 +188,9 @@ static void bs_longhorn_request(struct scsi_cmd *cmd)
 
 			if (tl > 0) {
 				if (lh_client_unmap(lh->conn, NULL, tl, offset) != 0) {
-					eprintf("Failed to punch hole for"
+					LONGHORN_ERROR_LOG("failed to punch hole for"
 						" UNMAP at offset:%" PRIu64
-						" length:%d\n",
+						" length:%d",
 						offset, tl);
 					result = SAM_STAT_CHECK_CONDITION;
 					key = HARDWARE_ERROR;
@@ -208,17 +208,17 @@ static void bs_longhorn_request(struct scsi_cmd *cmd)
 		// Ignore sync since it's synchronized by default
 		break;
 	default:
-		eprintf("unsupported cmd->scb[0]: %x\n", cmd->scb[0]);
+		LONGHORN_ERROR_LOG("unsupported cmd->scb[0]: %x", cmd->scb[0]);
 		break;
 	}
 
-	dprintf("io done %p %x %d %u\n", cmd, cmd->scb[0], ret, length);
+	LONGHORN_INFO_LOG("io done %p %x %d %u", cmd, cmd->scb[0], ret, length);
 
 	scsi_set_result(cmd, result);
 
 	if (result != SAM_STAT_GOOD) {
-		eprintf("io error %p %x %d %d %" PRIu64 ", %m\n",
-			cmd, cmd->scb[0], ret, length, cmd->offset);
+		LONGHORN_ERROR_LOG("io error %p %x %d %d %" PRIu64 ", %d",
+			cmd, cmd->scb[0], ret, length, cmd->offset, result);
 		sense_data_build(cmd, key, asc);
 	}
 }
@@ -232,7 +232,7 @@ static int bs_longhorn_open(struct scsi_lu *lu, char *path,
 
 	rc = lh_client_open_conn(lh->conn, path);
 	if (rc < 0) {
-		eprintf("Cannot establish connection\n");
+		LONGHORN_ERROR_LOG("cannot establish connection");
 		return rc;
 	}
 
@@ -248,7 +248,7 @@ static int bs_longhorn_open(struct scsi_lu *lu, char *path,
 static void bs_longhorn_close(struct scsi_lu *lu)
 {
 	if (LHP(lu)->conn) {
-		dprintf("close longhorn connection\n");
+		LONGHORN_INFO_LOG("close longhorn connection");
 		lh_client_close_conn(LHP(lu)->conn);
 	}
 }
